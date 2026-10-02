@@ -20,7 +20,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 
 module light_controller #(
-    parameter int N = 1       // clock cycles between color changes while held
+    parameter int N = 300_000_000       // clock cycles between color changes while held
 ) (
     input  wire       clk,
     input  wire       rst,
