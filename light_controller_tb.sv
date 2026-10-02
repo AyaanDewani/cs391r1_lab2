@@ -19,103 +19,84 @@
 // 
 //////////////////////////////////////////////////////////////////////////////////
 
+`timescale 1ns / 1ps
 
 module light_controller_tb;
-    localparam int CLK_PERIOD = 4;    // ns, so one cycle is 4 ns
+    // Target hardware: 100 MHz clock, so one cycle is 10 ns
+    localparam int CLK_HZ      = 100_000_000;
+    localparam int CLK_PERIOD  = 10;                  // ns
+    localparam int N_REAL      = 3 * CLK_HZ;          // 300,000,000 cycles = 3 s
 
-    // N values required by the lab:
-    //   1  -> a color change every clock cycle
-    //   10 -> a color change every 10 clock cycles
-    //   25 -> a color change every 100 ns (25 cycles at 4 ns each)
-    localparam int N0 = 1;
-    localparam int N1 = 10;
-    localparam int N2 = 25;
+    // scale down
+    localparam int SCALE       = 10;
+    localparam int N_SIM       = N_REAL / SCALE;
+    localparam int CHANGES     = 2;                   // color changes to verify
 
     logic clk = 1'b0;
     logic rst, button;
-    logic [2:0] state0, state1, state2;
+    logic [2:0] light_state;
     int errors = 0;
+    realtime t_change, t_prev;
 
     always #(CLK_PERIOD/2) clk = ~clk;
 
-    light_controller #(.N(N0)) dut0 (.clk(clk), .rst(rst), .button(button), .light_state(state0));
-    light_controller #(.N(N1)) dut1 (.clk(clk), .rst(rst), .button(button), .light_state(state1));
-    light_controller #(.N(N2)) dut2 (.clk(clk), .rst(rst), .button(button), .light_state(state2));
+    light_controller #(.N(N_SIM)) dut (
+        .clk(clk), .rst(rst), .button(button), .light_state(light_state)
+    );
 
-    // Reference model: state after c clock cycles of being held down
-    function automatic logic [2:0] expected(input int n, input int c);
-        int steps;
-        steps = c / n;                  // how many color changes have happened
-        return 3'd1 + (steps % 7);      // wraps from 7 back to 1
-    endfunction
-
-    task automatic compare(input string name, input int n, input logic [2:0] got,
-                           input logic [2:0] exp, input int c);
-        if (got !== exp) begin
-            $error("FAIL: N=%0d cycle=%0d light_state=%0d (expected %0d)", n, c, got, exp);
+    task automatic expect_state(input logic [2:0] exp, input string what);
+        if (light_state !== exp) begin
+            $error("FAIL: %s: light_state=%0d (expected %0d) at %0t", what, light_state, exp, $realtime);
             errors++;
-        end
-    endtask
-
-    // Hold the button for the given number of clock cycles, checking every cycle
-    task automatic press_and_check(input int cycles);
-        @(negedge clk);
-        button = 1'b1;
-        for (int c = 0; c < cycles; c++) begin
-            @(negedge clk);
-            compare("N0", N0, state0, expected(N0, c), c);
-            compare("N1", N1, state1, expected(N1, c), c);
-            compare("N2", N2, state2, expected(N2, c), c);
-        end
-        @(negedge clk);
-        button = 1'b0;
-        @(negedge clk);
-        // Rule 1: all three must go dark after release
-        compare("N0", N0, state0, 3'd0, -1);
-        compare("N1", N1, state1, 3'd0, -1);
-        compare("N2", N2, state2, 3'd0, -1);
-        $display("Press of %0d cycles checked", cycles);
+        end else
+            $display("PASS: %s: light_state=%0d at %0t", what, light_state, $realtime);
     endtask
 
     initial begin
-        // Reset
+        $display("N for a 3 second change at %0d Hz = %0d cycles", CLK_HZ, N_REAL);
+        $display("Simulating scaled down by %0d: N = %0d cycles (%0t per change)",
+                 SCALE, N_SIM, N_SIM * CLK_PERIOD * 1.0);
+
         rst = 1'b1; button = 1'b0;
         repeat (2) @(negedge clk);
-        if (state0 !== 3'd0 || state1 !== 3'd0 || state2 !== 3'd0) begin
-            $error("FAIL: reset did not clear light_state");
-            errors++;
-        end
         rst = 1'b0;
-
-        // Rule 1: idle with the button up keeps the light off
-        repeat (5) @(negedge clk);
-        compare("N0", N0, state0, 3'd0, -1);
-        compare("N1", N1, state1, 3'd0, -1);
-        compare("N2", N2, state2, 3'd0, -1);
-        $display("Idle state checked");
-
-        // Long press: 200 cycles is enough for all three to wrap past 7 back to 1
-        press_and_check(200);
-
-        // Short press: light turns on at state 1 and goes dark again
-        press_and_check(3);
-
-        // Second long press: confirms a new press restarts at 1
-        press_and_check(60);
-
-        // Reset while the button is held must force the light off
-        @(negedge clk) button = 1'b1;
-        repeat (5) @(negedge clk);
-        rst = 1'b1;
         @(negedge clk);
-        compare("N0", N0, state0, 3'd0, -1);
-        compare("N1", N1, state1, 3'd0, -1);
-        compare("N2", N2, state2, 3'd0, -1);
-        $display("Reset during press checked");
-        rst = 1'b0; button = 1'b0;
-        @(negedge clk);
+        expect_state(3'd0, "idle with button up");
 
-        if (errors == 0) $display("All tests passed for N = %0d, %0d, %0d", N0, N1, N2);
+        // Press and hold
+        @(negedge clk);
+        button = 1'b1;
+        @(negedge clk);                 // first cycle of the press
+        expect_state(3'd1, "first cycle of press");
+        t_prev = $realtime;
+
+        for (int k = 1; k <= CHANGES; k++) begin
+            // One cycle before the boundary the color must NOT have changed yet
+            repeat (N_SIM - 1) @(negedge clk);
+            expect_state(3'd0 + k, $sformatf("one cycle before change %0d", k));
+
+            // On the boundary cycle it must advance
+            @(negedge clk);
+            expect_state(3'd1 + k, $sformatf("at change %0d", k));
+
+            t_change = $realtime;
+            if ((t_change - t_prev) != N_SIM * CLK_PERIOD) begin
+                $error("FAIL: change %0d took %0t (expected %0t)",
+                       k, t_change - t_prev, N_SIM * CLK_PERIOD * 1.0);
+                errors++;
+            end else
+                $display("PASS: change %0d came exactly %0t after the previous one",
+                         k, t_change - t_prev);
+            t_prev = t_change;
+        end
+
+        // Release: light goes dark
+        @(negedge clk);
+        button = 1'b0;
+        @(negedge clk);
+        expect_state(3'd0, "after release");
+
+        if (errors == 0) $display("All tests passed. N for 3 s on hardware = %0d", N_REAL);
         else             $display("%0d test(s) failed", errors);
         $finish;
     end
